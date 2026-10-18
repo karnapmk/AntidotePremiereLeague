@@ -1,0 +1,10 @@
+
+1. Any trade can be made, but it is binding. Breaking one's word, even by accident, results in -n points, where n is the number of players. (9/18/26)
+
+2. Meta-game wagers (e.g. a certain player will guess a certain color) can be made, resulting in +-1 points to final score (9/18/26)
+
+3. The word "interesting" cannot be said during gameplay, nor can one bait players with "hmmm" or chin scratching. Penalty of -1 points. (9/18/26)
+
+4. Ending the game with a syringe or toxin is considered a bitch move, and will result in -ceil(n/2) points rather than the canon -1, where n is the number of players (e.g. -4 for 7 players, -3 for 5, -2 for 4). Record it as S (syringe) or X (toxin) on the score sheet. (10/7/26)
+
+

@@ -1,0 +1,135 @@
+10/18/26
+Ross: 2
+Karna: 3
+
+10/15/26
+Ross: S, 4, -3
+Vedanth: 5, 3, -4
+Haneen: -1, -1, -4
+Karna: -3, 1, -1
+Tony: -4, -3, -5
+
+
+10/10/26
+Ross: -5, 2, -2
+Ritwik: 4, 5, -7
+Jack: 6, 6, -7
+Haneen: -1, 4, -2
+Tony: -1, -4, 2
+Karna: 5, 1, -3
+Amy: 3, 7, -2
+
+10/10/26 
+Ritwik: -4
+Haneen: -2
+Amy: -2
+Ross: 4
+Karna: -1
+Jack: -6
+
+10/10/26
+Ritwik: 1
+Haneen: -2
+Tony: -2
+Ross: -6
+Karna: -3
+Jack: -6
+
+10/10/26
+Jack: -2
+Ritwik: -4
+Karna: -1
+Ross: -4
+
+10/9/26
+Ritwik: 3
+Tony: -3 
+
+10/9/26
+Amy: 2, -3
+Tony: -4, 1
+Karna: 3, -2
+Ross: 4, 3
+
+10/8/26
+Amy: -5, 3
+Tony: -6, -4
+Ross: -3, 2
+Karna: 4, -2
+Ritwik: 2, 6
+Vedanth: 6, 5
+
+10/8/26
+Amy: 7
+Ritwik: 5
+Karna: 1
+Ross: -2
+Haneen: 4
+Vedanth: -4
+Tony: 2
+
+10/7/26
+Tony: X
+Karna: 1
+Ross: 2
+
+10/6/26
+Karna: -5
+Ross: S
+Tony: 1
+Haneen: -4
+Ritwik: -3
+
+10/1/26
+pre-chai
+ross,ritwik,karna,haneen,xander,tony,sameer
+-3,-7,-5,-3,-6,-2,-5
+
+pre-chai and during chai and post chai
+ross,ritwik,nic,haneen xander tony   sameer
++5,-2,-5,-2,-7,-6,-3
+
+post-chai
+ ross ritwik karna haneen xander tony sameer
++3,+5,-6,-2,+7,-1,-1 
+
+post chai
+ross ritwik katna tony xander amy samir
+-2,-2,-3,+3,+6,-2,+4
+
+post chai
+ross ritwik karna tony nic amy samir
+-4 -3 S +6 -6 -6 -6
+
+9/25/26
+Amy: -3, 2, 2, 3, -5 
+Ross: -3, 3, -3, -4, -4
+Tony: -3, 5, 1, -1, 1
+Haneen: -4, 1, 4, -3, -1
+Karna: -5, -4, 3, 1, -1
+
+9/24/26
+Haneen: -3
+Ross: -2
+Tony: -1
+Karna: 4
+
+9/21/26
+Tony: -2
+Ross: -3
+Karna: -3
+
+9/20/26
+Tony: 1, 3, 1
+Amy: 3, 2, -2
+Karna: -2, 1, 2
+
+
+9/18/26
+Tony: -5, -4, -5, -3, -4, 5 
+Amy:  4, -5, 5, -4, -5, -3
+Karna: 2, -3, -5, -5, -5, 4
+Ross: 3, -3, 1, -5, -3, 1, 
+Ritwik: -3, -5, 4, -5, -4, -5
+
+
