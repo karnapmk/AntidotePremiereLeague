@@ -1,3 +1,4 @@
+import argparse
 import logging
 import re
 from datetime import datetime
@@ -29,6 +30,8 @@ BASE_DIR = Path(__file__).resolve().parent
 INPUT_FILE = BASE_DIR / "AntidoteScores.txt"
 WORKBOOK = BASE_DIR / "AntidoteStats.xlsx"
 REPORT_PDF = BASE_DIR / "Antidote Report Card.pdf"
+# A --npcs run writes its own file, so it never overwrites the regulars-only report.
+REPORT_PDF_NPCS = BASE_DIR / "Antidote Report Card (with NPCs).pdf"
 # Badge art lives on disk so the script needs no font tooling at runtime. The two
 # emoji were pulled from Apple Color Emoji's precomposed glyphs (u1F4AA.4 is the
 # brown muscle; writing the skin-tone modifier as text needs a shaper PIL lacks).
@@ -43,8 +46,18 @@ SNAKE_BADGE = IMAGE_DIR / "badge_snake.png"
 # Photos rather than cut-outs, so they are cropped to a ringed disc instead of keyed.
 CURRY_BADGE = IMAGE_DIR / "badge_curry.png"
 THINKER_BADGE = IMAGE_DIR / "badge_thinker.png"
+# The Claude app icon: the spark from the Claude Code extension's claude-logo.svg,
+# set in cream on a coral disc.
+CLAUDE_BADGE = IMAGE_DIR / "badge_claude.png"
 # A heavy "B" on an editor-style button tile, drawn once in Arial Black.
 BOLD_BADGE = IMAGE_DIR / "badge_bold.png"
+# Apple Color Emoji's sports medal, cut out the same way as the muscle and trophy.
+MEDAL_BADGE = IMAGE_DIR / "badge_medal.png"
+
+# The regulars. Everyone still gets a row in the spreadsheet, and everyone's rounds
+# still feed Elo and the peer stats, but only these players are ranked on the report
+# card unless --npcs is passed.
+CANONICAL_PLAYERS = {"Karna", "Haneen", "Ritwik", "Tony", "Amy", "Ross"}
 
 MIN_GAMES = 5
 # Scores are reported on the scale of a 5-player table.
@@ -66,6 +79,7 @@ STAT_COLUMNS = [
     "Rounds Won",
     "Win Rate",
     "Solo Wins",
+    "Solo Losses",
     "Rounds Survived",
     "Survival Rate",
     "Total Score",
@@ -212,7 +226,8 @@ def parse_sessions(path):
 
 
 def compute_elo(round_scores):
-    """Pairwise Elo on clamped scores: every player in a game is rated against every other."""
+    """Pairwise Elo on clamped scores: every player in a game is rated against every other.
+    """
     ratings = {}
     for scores in round_scores:
         names = list(scores)
@@ -295,7 +310,17 @@ def build_tables(sessions):
     played.sort(key=lambda entry: entry[0])
     # Only the hand-played stats need hands; everything downstream takes plain scores.
     round_scores = [scores for _, scores, _ in played]
+    round_dates = [key[0] for key, _, _ in played]
     ratings = compute_elo(round_scores)
+
+    # Running average score after each round a player sat in, on the same
+    # 5-player scale the Scoring Champion award uses.
+    score_history = {}
+    for round_index, scores in enumerate(round_scores):
+        for name, score in scores.items():
+            points = score_history.setdefault(name, [])
+            total = (points[-1][1] * len(points) if points else 0) + score / len(scores) * SCORE_SCALE
+            points.append((round_index, total / (len(points) + 1)))
 
     # Every per-player stat below needs the round it was earned in -- the table size
     # sets the score range, and the group's own results are the yardstick.
@@ -319,8 +344,11 @@ def build_tables(sessions):
                     "score": score,
                     "hand": hands[name],
                     "won": score > 0 and score == best,
-                    # The only survivor at a table of two or more.
-                    "solo": score > 0 and survivors == 1 and count > 1,
+                    # The only survivor at a table of three or more. In a 1v1 the
+                    # winner is always the lone survivor, so it says nothing extra.
+                    "solo": score > 0 and survivors == 1 and count > 2,
+                    # The mirror image: the only one at a 3+ table who died.
+                    "solo_loss": score <= 0 and survivors == count - 1 and count > 2,
                     "count": count,
                     "group_score": group_score,
                     "peer_survival": peers,
@@ -344,6 +372,7 @@ def build_tables(sessions):
                 "Rounds Won": sum(g["won"] for g in games),
                 "Win Rate": round(average(games, lambda g: g["won"]), 3),
                 "Solo Wins": sum(g["solo"] for g in games),
+                "Solo Losses": sum(g["solo_loss"] for g in games),
                 "Rounds Survived": sum(g["score"] > 0 for g in games),
                 "Survival Rate": round(average(games, lambda g: g["score"] > 0), 3),
                 "Total Score": sum(g["score"] for g in games),
@@ -374,7 +403,7 @@ def build_tables(sessions):
             }
         )
     player_stats = pd.DataFrame(stat_rows, columns=STAT_COLUMNS)
-    return game_log, player_stats, round_scores
+    return game_log, player_stats, round_scores, (score_history, round_dates)
 
 
 def summarize_rounds(round_scores):
@@ -749,8 +778,8 @@ def decorate_margins(page, fonts):
                   rotation=90, va="bottom", ha="center", zorder=1)
 
 
-def render_page(page_sections, first_index, qualified, fonts, subtitle, page_no, page_count):
-    """One sheet: masthead, up to SECTIONS_PER_PAGE awards, footer."""
+def new_page(fonts, subtitle, page_no, page_count):
+    """A blank sheet with the shared texture, masthead and footer."""
     fig = plt.figure(figsize=(PAGE_W, PAGE_H))
     fig.patch.set_facecolor(SURFACE)
 
@@ -776,6 +805,28 @@ def render_page(page_sections, first_index, qualified, fonts, subtitle, page_no,
               fontname=fonts["body"], fontsize=9, color=INK_SOFT, zorder=3)
     page.plot([0.7, 7.8], [9.24, 9.24], color=AXIS, linewidth=0.6, zorder=2)
 
+    page.plot([0.7, 7.8], [0.62, 0.62], color=AXIS, linewidth=0.6, zorder=2)
+    page.text(0.7, 0.40,
+              f"Minimum {MIN_GAMES} rounds to qualify · scores normalized to a "
+              f"{SCORE_SCALE}-player table · generated {datetime.now():%d %B %Y}",
+              fontname=fonts["body"], fontsize=6.8, color=INK_MUTED, zorder=3)
+    page.text(7.8, 0.40, f"Page {page_no} of {page_count}", ha="right",
+              fontname=fonts["body"], fontsize=6.8, color=INK_MUTED, zorder=3)
+    return fig, page
+
+
+def section_heading(fig, page, top, badge, badge_height, heading, blurb, fonts):
+    place_image(fig, page, badge, (1.06, top - 0.33), badge_height, BADGE_SLOT_W)
+    page.text(1.58, top - 0.24, spaced(heading), fontname=fonts["label"],
+              fontsize=11, color=INK, zorder=3)
+    page.text(1.60, top - 0.52, blurb, fontname=fonts["body"], fontsize=8,
+              color=INK_MUTED, zorder=3)
+
+
+def render_page(page_sections, first_index, qualified, fonts, subtitle, page_no, page_count):
+    """One sheet: masthead, up to SECTIONS_PER_PAGE awards, footer."""
+    fig, page = new_page(fonts, subtitle, page_no, page_count)
+
     # Accent and glassware follow the award's place in the whole report; the vertical
     # slot follows its place on this sheet.
     for offset, section in enumerate(page_sections):
@@ -784,29 +835,94 @@ def render_page(page_sections, first_index, qualified, fonts, subtitle, page_no,
         accent = ACCENTS[index % len(ACCENTS)]
         top = 9.05 - offset * 2.78
 
-        place_image(fig, page, section["badge"], (1.06, top - 0.33), section["badge_height"],
-                    BADGE_SLOT_W)
-        page.text(1.58, top - 0.24, spaced(section["heading"]), fontname=fonts["label"],
-                  fontsize=11, color=INK, zorder=3)
-        page.text(1.60, top - 0.52, section["blurb"], fontname=fonts["body"], fontsize=8,
-                  color=INK_MUTED, zorder=3)
+        section_heading(fig, page, top, section["badge"], section["badge_height"],
+                        section["heading"], section["blurb"], fonts)
         decorate_section(page, index, top, accent)
 
         draw_ranking(fig, (1.75, top - 2.46, 6.05, 1.62), qualified, section, accent, fonts)
-
-    page.plot([0.7, 7.8], [0.62, 0.62], color=AXIS, linewidth=0.6, zorder=2)
-    page.text(0.7, 0.40,
-              f"Minimum {MIN_GAMES} rounds to qualify · scores normalized to a "
-              f"{SCORE_SCALE}-player table · generated {datetime.now():%d %B %Y}",
-              fontname=fonts["body"], fontsize=6.8, color=INK_MUTED, zorder=3)
-    page.text(7.8, 0.40, f"Page {page_no} of {page_count}", ha="right",
-              fontname=fonts["body"], fontsize=6.8, color=INK_MUTED, zorder=3)
     return fig
 
 
-def write_report_card(player_stats, game_log):
+def render_trend_page(trend_data, fonts, subtitle, page_no, page_count):
+    """Small multiples: one panel per canonical player, shared axes."""
+    history, round_dates = trend_data
+    fig, page = new_page(fonts, subtitle, page_no, page_count)
+    # Always the regulars, even with --npcs: a guest's handful of rounds makes a
+    # line too short to read as a trend.
+    # A running average over one or two rounds swings wildly and would stretch the
+    # shared axis until every settled line looks flat, so each line starts at the
+    # same MIN_GAMES threshold the awards use.
+    lines = {name: ([x for x, _ in history[name][MIN_GAMES - 1:]],
+                    [r for _, r in history[name][MIN_GAMES - 1:]])
+             for name in CANONICAL_PLAYERS if len(history.get(name, [])) >= MIN_GAMES}
+    order = sorted(lines, key=lambda name: -lines[name][1][-1])
+
+    section_heading(fig, page, 9.05, load_badge(TROPHY_BADGE), 0.50,
+                    "AVERAGE SCORE OVER TIME",
+                    f"Running average score from their {MIN_GAMES}th round on · normalized to a "
+                    f"{SCORE_SCALE}-player table", fonts)
+    decorate_section(page, 0, 9.05, ACCENTS[3])
+
+    accent = ACCENTS[0]
+    every = [v for _, ratings in lines.values() for v in ratings]
+    low, high = min(every), max(every)
+    # Keep zero in view: it is the line between a winning and a losing average.
+    low, high = min(low, 0), max(high, 0)
+    pad = max((high - low) * 0.08, 0.25)
+    ylim = (low - pad, high + pad)
+    xlim = (-0.5, len(round_dates) - 0.5)
+
+    # Month ticks at the first round played in each month.
+    ticks, labels = [], []
+    for index, day in enumerate(round_dates):
+        label = day.strftime("%b")
+        if not labels or labels[-1] != label:
+            ticks.append(index)
+            labels.append(label)
+
+    cols, panel_w, panel_h = 2, 2.85, 2.05
+    left0, top0, gap_x, gap_y = 1.15, 8.10, 0.75, 0.55
+    for slot, name in enumerate(order):
+        row, col = divmod(slot, cols)
+        x0 = left0 + col * (panel_w + gap_x)
+        y0 = top0 - (row + 1) * panel_h - row * gap_y
+        ax = fig.add_axes([x0 / PAGE_W, y0 / PAGE_H, panel_w / PAGE_W, panel_h / PAGE_H])
+        ax.set_facecolor("none")
+        ax.set_zorder(2)
+        ax.set_xlim(*xlim)
+        ax.set_ylim(*ylim)
+        for spine in ax.spines.values():
+            spine.set_visible(False)
+        ax.grid(axis="y", color=GRID, linewidth=0.55, zorder=0)
+        ax.set_axisbelow(True)
+        ax.axhline(0, color=AXIS, linewidth=0.9, zorder=1)
+        ax.tick_params(colors=INK_MUTED, labelsize=6.5, length=0, pad=4)
+        ax.set_xticks(ticks)
+        ax.set_xticklabels(labels)
+        ax.yaxis.set_major_locator(MaxNLocator(5))
+        ax.yaxis.set_major_formatter(FuncFormatter(lambda v, _: f"{round(v, 1) + 0.0:.1f}"))
+        if col:
+            ax.set_yticklabels([])
+        for label in ax.get_xticklabels() + ax.get_yticklabels():
+            label.set_fontname(fonts["num"])
+
+        xs, ratings = lines[name]
+        ax.plot(xs, ratings, color=accent, linewidth=2.0, solid_capstyle="round",
+                solid_joinstyle="round", zorder=4)
+
+        ax.text(0.0, 1.06, name, transform=ax.transAxes, fontname=fonts["body"],
+                fontsize=9.4, fontweight="demi", color=INK, va="bottom")
+        ax.text(1.0, 1.06, f"now {round(ratings[-1], 2) + 0.0:.2f}", transform=ax.transAxes, ha="right", va="bottom",
+                fontname=fonts["num"], fontsize=6.8, color=INK_SOFT)
+    return fig
+
+
+def write_report_card(player_stats, game_log, trend_data, include_npcs=False):
     # PlayerStats keeps everyone; the rankings only mean something once a player has
     # enough rounds for the rates to settle, so the report card qualifies them here.
+    # Guests (anyone outside CANONICAL_PLAYERS) are dropped too, unless asked for.
+    if not include_npcs:
+        player_stats = player_stats[player_stats["Player"].isin(CANONICAL_PLAYERS)]
     qualified = player_stats[player_stats["Games"] >= MIN_GAMES].reset_index(drop=True)
     for name, games in zip(player_stats["Player"], player_stats["Games"]):
         if games < MIN_GAMES:
@@ -837,7 +953,9 @@ def write_report_card(player_stats, game_log):
     snake = load_badge(SNAKE_BADGE)
     curry = load_badge(CURRY_BADGE)
     thinker = load_badge(THINKER_BADGE)
+    claude = load_badge(CLAUDE_BADGE)
     bold = load_badge(BOLD_BADGE)
+    medal = load_badge(MEDAL_BADGE)
 
     sections = [
         {
@@ -908,8 +1026,20 @@ def write_report_card(player_stats, game_log):
             "badge": thinker,
             "badge_height": 0.48,
             "heading": "FREE THINKER",
-            "blurb": "Solo wins · rounds they alone survived while the rest of the table died",
+            "blurb": "Solo wins · rounds they alone survived while the rest of the table died "
+                     "· 3+ players",
             "column": "Solo Wins",
+            "form": "count",
+            "value_fmt": lambda v: f"{v:.0f}",
+            "tick_fmt": lambda v, _: f"{v:.0f}",
+        },
+        {
+            "badge": claude,
+            "badge_height": 0.36,
+            "heading": "OVERFITTER",
+            "blurb": "Solo losses · rounds they alone died while the rest of the table survived "
+                     "· 3+ players",
+            "column": "Solo Losses",
             "form": "count",
             "value_fmt": lambda v: f"{v:.0f}",
             "tick_fmt": lambda v, _: f"{v:.0f}",
@@ -926,6 +1056,16 @@ def write_report_card(player_stats, game_log):
             "value_fmt": lambda v: f"{v:.2f}",
             "tick_fmt": lambda v, _: f"{v:.0f}",
         },
+        {
+            "badge": medal,
+            "badge_height": 0.50,
+            "heading": "PARTICIPATION TROPHY",
+            "blurb": "Rounds played · thanks for showing up",
+            "column": "Games",
+            "form": "count",
+            "value_fmt": lambda v: f"{v:.0f}",
+            "tick_fmt": lambda v, _: f"{v:.0f}",
+        },
     ]
 
     dates = sorted({d for d in game_log["Date"]}, key=lambda d: parse_date(d) or datetime.min.date())
@@ -938,13 +1078,17 @@ def write_report_card(player_stats, game_log):
 
     pages = [sections[start:start + SECTIONS_PER_PAGE]
              for start in range(0, len(sections), SECTIONS_PER_PAGE)]
-    with PdfPages(REPORT_PDF) as pdf:
+    page_count = len(pages) + 1  # the score-over-time page closes the report
+    with PdfPages(REPORT_PDF_NPCS if include_npcs else REPORT_PDF) as pdf:
         for page_no, page_sections in enumerate(pages, start=1):
             fig = render_page(page_sections, (page_no - 1) * SECTIONS_PER_PAGE, qualified,
-                              fonts, subtitle, page_no, len(pages))
+                              fonts, subtitle, page_no, page_count)
             pdf.savefig(fig, facecolor=SURFACE)
             plt.close(fig)
-    return len(pages), len(sections)
+        fig = render_trend_page(trend_data, fonts, subtitle, page_count, page_count)
+        pdf.savefig(fig, facecolor=SURFACE)
+        plt.close(fig)
+    return page_count, len(sections)
 
 
 def cell_value(value):
@@ -1025,8 +1169,13 @@ def write_blocks(book, name, blocks):
 
 
 def main():
+    parser = argparse.ArgumentParser(description="Antidote score stats and report card")
+    parser.add_argument("--npcs", action="store_true",
+                        help="also rank players outside the canonical set on the report card")
+    args = parser.parse_args()
+
     sessions = parse_sessions(INPUT_FILE)
-    game_log, player_stats, rounds = build_tables(sessions)
+    game_log, player_stats, rounds, trend_data = build_tables(sessions)
     group_stats, count_stats = build_group_tables(rounds)
 
     if WORKBOOK.exists():
@@ -1042,19 +1191,23 @@ def main():
         ("By player count", count_stats),
     ])
     book.save(WORKBOOK)
-    report = write_report_card(player_stats, game_log)
+    report = write_report_card(player_stats, game_log, trend_data, include_npcs=args.npcs)
 
     # Excel keeps its own copy in memory and would overwrite this save on close.
     if (BASE_DIR / f"~${WORKBOOK.name}").exists():
         print(f"Warning: {WORKBOOK.name} looks open in Excel -- close without saving, then reopen")
 
-    ranked = int((player_stats["Games"] >= MIN_GAMES).sum())
+    eligible = player_stats["Games"] >= MIN_GAMES
+    if not args.npcs:
+        eligible &= player_stats["Player"].isin(CANONICAL_PLAYERS)
+    ranked = int(eligible.sum())
     print(f"{WORKBOOK.name}: {len(game_log)} games, {len(player_stats)} players in stats "
           f"({ranked} ranked), {len(group_stats)} lineups across "
           f"{len(count_stats)} table sizes")
     if report:
         pages, awards = report
-        print(f"{REPORT_PDF.name}: {awards} awards over {pages} pages")
+        report_pdf = REPORT_PDF_NPCS if args.npcs else REPORT_PDF
+        print(f"{report_pdf.name}: {awards} awards over {pages} pages")
 
 
 if __name__ == "__main__":
