@@ -66,6 +66,9 @@ SCORE_SCALED = f"Average Score ({SCORE_SCALE}-player scale)"
 HAND_SCALED = f"Average Hand Played ({SCORE_SCALE}-player scale)"
 SNAKE_COLUMN = "Peer Survival Rate | Survived"
 TEAM_COLUMN = "Peer Survival Rate | All Rounds"
+# A 2-player game is dealt like a 3-player one (cards run to 3, with the silent player), so
+# it is scored like one: S/X penalties and every normalized column use at least 3 players.
+SCORING_MIN_PLAYERS = 3
 ELO_START = 1000
 ELO_K = 32
 
@@ -142,11 +145,16 @@ class Score(tuple):
         return pair
 
 
+def scoring_size(players):
+    """The table size a round is scored at: the real count, but never below 3."""
+    return max(players, SCORING_MIN_PLAYERS)
+
+
 def parse_score(token, table_size):
     """Return (score, hand) for a token like '5', '-3', '(5-1)', 'S' or '(X-1)'.
 
     S (syringe) and X (toxin) mark a player who ended the game with that card, which
-    the house rules score as -ceil(n/2) at an n-player table. The hand is how big a
+    the house rules score as -ceil(n/2) at an n-player table (n counted as at least 3). The hand is how big a
     card was gambled on: the score's size, but 0 for S or X, since that penalty is
     set by the table rather than chosen.
     """
@@ -158,7 +166,7 @@ def parse_score(token, table_size):
     if not match:
         raise ValueError(f"Cannot parse score {token!r}")
     head = match.group(1)
-    base = -((table_size + 1) // 2) if head in END_CARDS else int(head)
+    base = -((scoring_size(table_size) + 1) // 2) if head in END_CARDS else int(head)
     adjustments = [int(a) for a in re.findall(r"[+-]\d+", match.group(2))]
     score = base + sum(adjustments)
     if head in END_CARDS:
@@ -347,7 +355,7 @@ def build_tables(sessions):
     for round_index, scores in enumerate(round_scores):
         for name, score in scores.items():
             points = score_history.setdefault(name, [])
-            total = (points[-1][1] * len(points) if points else 0) + score / len(scores) * SCORE_SCALE
+            total = (points[-1][1] * len(points) if points else 0) + score / scoring_size(len(scores)) * SCORE_SCALE
             points.append((round_index, total / (len(points) + 1)))
 
     # Every per-player stat below needs the round it was earned in -- the table size
@@ -378,6 +386,8 @@ def build_tables(sessions):
                     # The mirror image: the only one at a 3+ table who died.
                     "solo_loss": score <= 0 and survivors == count - 1 and count > 2,
                     "count": count,
+                    # What normalized columns divide by: 2-player rounds count as 3.
+                    "scale": scoring_size(count),
                     "group_score": group_score,
                     "peer_survival": peers,
                     "delta": score - group_score,
@@ -409,13 +419,13 @@ def build_tables(sessions):
                 # average those per-round ratios -- never total/total, which would let
                 # the biggest tables dominate.
                 "Average Normalized Score":
-                    round(average(games, lambda g: g["score"] / g["count"]), 3),
+                    round(average(games, lambda g: g["score"] / g["scale"]), 3),
                 "Average Hand Played": round(average(games, lambda g: g["hand"]), 2),
                 "Average Normalized Hand Played":
-                    round(average(games, lambda g: g["hand"] / g["count"]), 3),
+                    round(average(games, lambda g: g["hand"] / g["scale"]), 3),
                 "Average Group Score": round(average(games, lambda g: g["group_score"]), 2),
                 "Average Normalized Group Score":
-                    round(average(games, lambda g: g["group_score"] / g["count"]), 3),
+                    round(average(games, lambda g: g["group_score"] / g["scale"]), 3),
                 TEAM_COLUMN:
                     round(average(with_peers, lambda g: g["peer_survival"]), 3)
                     if with_peers else None,
@@ -426,7 +436,7 @@ def build_tables(sessions):
                     if survived else None,
                 "Average Delta": round(average(games, lambda g: g["delta"]), 2),
                 "Average Normalized Delta":
-                    round(average(games, lambda g: g["delta"] / g["count"]), 3),
+                    round(average(games, lambda g: g["delta"] / g["scale"]), 3),
                 "Elo": round(ratings.get(name, ELO_START)),
             }
         )
@@ -1196,7 +1206,8 @@ def write_blocks(book, name, blocks):
         sheet.column_dimensions[letter].width = width
 
 
-def write_json(path, sessions, player_stats, rounds, trend_data, group_stats, count_stats, extras):
+def write_json(path, sessions, player_stats, rounds, trend_data, group_stats, count_stats, extras,
+               uncertainty):
     """Every number the website shows, unrounded where the script keeps full precision."""
     import json
 
@@ -1214,6 +1225,7 @@ def write_json(path, sessions, player_stats, rounds, trend_data, group_stats, co
         "byGroup": records(group_stats),
         "elo": extras["ratings"],
         **{k: v for k, v in extras.items() if k not in ("rounds", "ratings")},
+        "uncertainty": uncertainty,
     }
     path.write_text(json.dumps(data, indent=1))
     print(f"{path}: {data['rounds']} rounds, {len(data['players'])} players")
@@ -1230,16 +1242,19 @@ def main():
                              "the workbook and report card are left alone")
     args = parser.parse_args()
 
-    # Imported here: league_extras imports constants from this module.
+    # Imported here: league_extras and league_stats import constants from this module.
     import league_extras
+    import league_stats
 
     sessions = parse_sessions(args.input)
     game_log, player_stats, rounds, trend_data = build_tables(sessions)
     group_stats, count_stats = build_group_tables(rounds)
     extras = league_extras.build_extras(collect_rounds(sessions)[0])
+    uncertainty = league_stats.build_uncertainty(extras["rounds"])
 
     if args.json:
-        write_json(args.json, sessions, player_stats, rounds, trend_data, group_stats, count_stats, extras)
+        write_json(args.json, sessions, player_stats, rounds, trend_data, group_stats, count_stats, extras,
+                   uncertainty)
         return
 
     if WORKBOOK.exists():
@@ -1255,6 +1270,8 @@ def main():
         ("By player count", count_stats),
     ])
     for name, blocks in league_extras.extras_sheets(extras, pd).items():
+        write_blocks(book, name, blocks)
+    for name, blocks in league_stats.significance_sheets(uncertainty, pd).items():
         write_blocks(book, name, blocks)
     book.save(WORKBOOK)
     report = write_report_card(player_stats, game_log, trend_data, include_npcs=args.npcs)

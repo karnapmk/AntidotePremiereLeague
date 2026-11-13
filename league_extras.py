@@ -9,7 +9,7 @@ Everything works on `rounds`: the chronological list of rounds from collect_roun
 a dict with i, date (ISO), label, block, round_in_block and entries {name: Score}.
 """
 
-from Antidote_score_stats import ELO_K, ELO_START, MIN_GAMES, SCORE_SCALE
+from Antidote_score_stats import ELO_K, ELO_START, MIN_GAMES, SCORE_SCALE, scoring_size
 
 # A "best partner" or "toughest rival" needs at least this many shared rounds, and a
 # partner's effect needs this many rounds both with and without them.
@@ -116,8 +116,8 @@ def player_extras(rounds, elo_history):
         # Elo change over the same last FORM_ROUNDS rounds: from the rating before the
         # first of them (the start rating if that was their first game ever).
         start = elo[-len(last) - 1][1] if len(elo) > len(last) else ELO_START
-        form_scaled = mean(e[0] / n * SCORE_SCALE for _, e, n in last)
-        career_scaled = mean(e[0] / n * SCORE_SCALE for _, e, n in games)
+        form_scaled = mean(e[0] / scoring_size(n) * SCORE_SCALE for _, e, n in last)
+        career_scaled = mean(e[0] / scoring_size(n) * SCORE_SCALE for _, e, n in games)
 
         # Bounce-back: the next round the same night, after a death or after surviving.
         after_death, after_live = [], []
@@ -256,7 +256,7 @@ def table_sizes(rounds):
             "endRate": sum(bool(getattr(e, "end", None)) for e in entries) / len(entries),
             "byPlayer": {
                 name: {"n": len(es), "survival": mean(survived(e) for e in es),
-                       "scaled": mean(e[0] / count * SCORE_SCALE for e in es)}
+                       "scaled": mean(e[0] / scoring_size(count) * SCORE_SCALE for e in es)}
                 for name, es in by_player.items()
             },
         })
