@@ -130,6 +130,18 @@ SECTIONS_PER_PAGE = 3
 BADGE_SLOT_W = 0.62
 
 
+class Score(tuple):
+    """A (score, hand) pair that also remembers its end card: .end is "S", "X" or None.
+
+    Still unpacks as `score, hand`, so every caller that only wants those is unchanged.
+    """
+
+    def __new__(cls, score, hand, end=None):
+        pair = super().__new__(cls, (score, hand))
+        pair.end = end
+        return pair
+
+
 def parse_score(token, table_size):
     """Return (score, hand) for a token like '5', '-3', '(5-1)', 'S' or '(X-1)'.
 
@@ -149,7 +161,9 @@ def parse_score(token, table_size):
     base = -((table_size + 1) // 2) if head in END_CARDS else int(head)
     adjustments = [int(a) for a in re.findall(r"[+-]\d+", match.group(2))]
     score = base + sum(adjustments)
-    return score, 0 if head in END_CARDS else abs(score)
+    if head in END_CARDS:
+        return Score(score, 0, head)
+    return Score(score, abs(score))
 
 
 def parse_date(text):
@@ -260,7 +274,11 @@ def average(records, pick):
     return sum(pick(record) for record in records) / len(records)
 
 
-def build_tables(sessions):
+def collect_rounds(sessions):
+    """Every round as ((date, session index, round index), label, {name: Score}), sorted.
+
+    Also returns the GameLog rows and the players in order of first appearance.
+    """
     log_rows = []
     player_order = []
     seen = set()
@@ -305,9 +323,19 @@ def build_tables(sessions):
             scores = {name: score for name, (score, _) in entries.items()}
             hands = {name: hand for name, (_, hand) in entries.items()}
             log_rows.append({"Date": date, "Round": round_index + 1, **scores})
-            played.append(((session["parsed_date"], session_index, round_index), scores, hands))
+            played.append(((session["parsed_date"], session_index, round_index), date, entries))
 
     played.sort(key=lambda entry: entry[0])
+    return played, log_rows, player_order
+
+
+def build_tables(sessions):
+    rounds, log_rows, player_order = collect_rounds(sessions)
+    played = [
+        (key, {name: score for name, (score, _) in entries.items()},
+         {name: hand for name, (_, hand) in entries.items()})
+        for key, _, entries in rounds
+    ]
     # Only the hand-played stats need hands; everything downstream takes plain scores.
     round_scores = [scores for _, scores, _ in played]
     round_dates = [key[0] for key, _, _ in played]
@@ -1168,15 +1196,51 @@ def write_blocks(book, name, blocks):
         sheet.column_dimensions[letter].width = width
 
 
+def write_json(path, sessions, player_stats, rounds, trend_data, group_stats, count_stats, extras):
+    """Every number the website shows, unrounded where the script keeps full precision."""
+    import json
+
+    score_history, round_dates = trend_data
+    records = lambda frame: [{k: cell_value(v) for k, v in row.items()} for row in frame.to_dict("records")]
+    data = {
+        "rounds": len(rounds),
+        "sessions": len({s["date"] for s in sessions if s["parsed_date"] is not None and
+                         (s["rounds"] or s["players"])}),
+        "players": records(player_stats),
+        "roundScores": rounds,
+        "dates": [d.isoformat() for d in round_dates],
+        "history": {name: [list(p) for p in points] for name, points in score_history.items()},
+        "byCount": records(count_stats),
+        "byGroup": records(group_stats),
+        "elo": extras["ratings"],
+        **{k: v for k, v in extras.items() if k not in ("rounds", "ratings")},
+    }
+    path.write_text(json.dumps(data, indent=1))
+    print(f"{path}: {data['rounds']} rounds, {len(data['players'])} players")
+
+
 def main():
     parser = argparse.ArgumentParser(description="Antidote score stats and report card")
     parser.add_argument("--npcs", action="store_true",
                         help="also rank players outside the canonical set on the report card")
+    parser.add_argument("--input", type=Path, default=INPUT_FILE,
+                        help="score file to read (default: AntidoteScores.txt)")
+    parser.add_argument("--json", type=Path, metavar="PATH",
+                        help="only write every stat to PATH as JSON (the website's test fixture); "
+                             "the workbook and report card are left alone")
     args = parser.parse_args()
 
-    sessions = parse_sessions(INPUT_FILE)
+    # Imported here: league_extras imports constants from this module.
+    import league_extras
+
+    sessions = parse_sessions(args.input)
     game_log, player_stats, rounds, trend_data = build_tables(sessions)
     group_stats, count_stats = build_group_tables(rounds)
+    extras = league_extras.build_extras(collect_rounds(sessions)[0])
+
+    if args.json:
+        write_json(args.json, sessions, player_stats, rounds, trend_data, group_stats, count_stats, extras)
+        return
 
     if WORKBOOK.exists():
         book = load_workbook(WORKBOOK)
@@ -1190,6 +1254,8 @@ def main():
         ("By lineup", group_stats),
         ("By player count", count_stats),
     ])
+    for name, blocks in league_extras.extras_sheets(extras, pd).items():
+        write_blocks(book, name, blocks)
     book.save(WORKBOOK)
     report = write_report_card(player_stats, game_log, trend_data, include_npcs=args.npcs)
 
