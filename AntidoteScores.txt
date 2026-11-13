@@ -1,3 +1,8 @@
+11/13/26
+Ross: 1, 2
+Karna: -2, 3
+Haneen: -3, -1
+
 11/10/26
 Ross: 3
 Karna: -1
