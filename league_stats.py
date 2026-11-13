@@ -5,19 +5,23 @@ tests check it number for number against `--json`: both use the same seeded gene
 the bootstrap resamples are identical. Change a method here, change it there.
 
 Methods:
-- Bootstrap by night: rounds on one night share players and table dynamics, so whole nights
-  are resampled with replacement (kept in date order so Elo replays sensibly). Every stat is
-  recomputed on each resample; 95% intervals are the 2.5th and 97.5th percentiles (linear
-  interpolation, numpy's default). "Chance of #1" is the share of resamples a player tops.
+- Bootstrap by table: a table (one date block in the score file: one group playing consecutive
+  rounds) shares players and dynamics, so whole tables are resampled with replacement (kept in
+  date order so Elo replays sensibly). Every stat is recomputed on each resample; 95% intervals
+  are the 2.5th and 97.5th percentiles (linear interpolation, numpy's default). "Chance of #1"
+  is the share of resamples a player tops.
 - Versus the league: the bootstrap distribution of (player - league average) gives a
-  two-sided p-value, 2 x the smaller tail at zero.
+  two-sided p-value, 2 x the smaller tail at zero (+1 smoothing).
+- Robustness: the same p-values are also worked out with a bootstrap of single rounds. A
+  difference is "firm" when both agree (q < ALPHA under each) and "borderline" when only one
+  does: which clustering is right is a judgement call, so we show where it matters.
 - Exact tests: head-to-head is a two-sided sign test on rounds one finished ahead (level
   rounds dropped); chemistry, bounce-back and the closer use Fisher's exact test on survived /
   died counts; hot-or-due is a permutation test of the last FORM_ROUNDS rounds vs the rest.
 - Many players and pairs are tested at once, so each family of p-values also gets
   Benjamini-Hochberg q-values (false discovery rate).
-Only players with MIN_GAMES rounds over at least MIN_NIGHTS nights are tested: resampling one
-or two nights says nothing. "Chance of #1" is among the regulars, like the report card.
+Only players with MIN_GAMES rounds over at least MIN_TABLES tables are tested: resampling one
+or two tables says nothing. "Chance of #1" is among the regulars, like the report card.
 """
 
 import math
@@ -29,7 +33,7 @@ BOOTSTRAP_SAMPLES = 2000
 PERMUTATIONS = 2000
 STATS_SEED = 1729
 ALPHA = 0.05
-MIN_NIGHTS = 3
+MIN_TABLES = 3
 
 AWARD_KEYS = ["winRate", "survivalRate", "scaledScore", "elo", "teamPlayer", "snake",
               "soloWins", "soloLosses", "scaledHand", "ends"]
@@ -236,68 +240,80 @@ def interval(xs):
 
 
 def build_uncertainty(rounds, samples=BOOTSTRAP_SAMPLES, permutations=PERMUTATIONS, seed=STATS_SEED):
-    nights = []
+    # Tables: consecutive rounds from one date block (rounds arrive sorted by date, block, round).
+    tables = []
     for r in rounds:
-        if nights and nights[-1][0]["date"] == r["date"]:
-            nights[-1].append(r)
+        if tables and tables[-1][0]["date"] == r["date"] and tables[-1][0]["block"] == r["block"]:
+            tables[-1].append(r)
         else:
-            nights.append([r])
+            tables.append([r])
     order = player_order(rounds)
     base = sample_stats(rounds)
-    nights_of = lambda n: sum(any(n in r["entries"] for r in rs) for rs in nights)
+    tables_of = lambda n: sum(any(n in r["entries"] for r in rs) for rs in tables)
     qualified = [n for n in order
-                 if base["stats"][n]["games"] >= MIN_GAMES and nights_of(n) >= MIN_NIGHTS]
+                 if base["stats"][n]["games"] >= MIN_GAMES and tables_of(n) >= MIN_TABLES]
     contenders = {n for n in qualified if n in CANONICAL_PLAYERS}
-
-    values = {k: {n: [] for n in qualified} for k in AWARD_KEYS}
-    diffs = {k: {n: [] for n in qualified} for k in AWARD_KEYS}
-    top = {k: {n: 0 for n in qualified} for k in AWARD_KEYS}
     size_keys = list(base["sizes"])
-    size_vals = {k: [] for k in size_keys}
-    win_vals = {a: {b: [] for b in qualified if b != a} for a in qualified}
-    rand = mulberry32(seed)
-    N = len(nights)
-    for _ in range(samples):
-        idx = sorted(math.floor(rand() * N) for _ in range(N))
-        rs = [r for k in idx for r in nights[k]]
-        sm = sample_stats(rs)
-        for key in AWARD_KEYS:
-            best = None
-            winners = []
-            for n in qualified:
-                v = sm["stats"].get(n, {}).get(key)
-                if v is None:
-                    continue
-                values[key][n].append(v)
-                ref = sm["league"][key]
-                if key not in NO_BASELINE and ref is not None:
-                    diffs[key][n].append(v - ref)
-                if n not in contenders:
-                    continue
-                if best is None or (v < best if key in ASCENDING else v > best):
-                    best, winners = v, [n]
-                elif v == best:
-                    winners.append(n)
-            for w in winners:
-                top[key][w] += 1 / len(winners)
-        for k in size_keys:
-            if k in sm["sizes"]:
-                size_vals[k].append(sm["sizes"][k])
-        for a in qualified:
-            ra = sm["stats"].get(a, {}).get("elo")
-            if ra is None:
+
+    def boot(clusters, rand, full):
+        """Resample clusters `samples` times; `full` also keeps intervals, #1 and win chances."""
+        values = {k: {n: [] for n in qualified} for k in AWARD_KEYS}
+        diffs = {k: {n: [] for n in qualified} for k in AWARD_KEYS}
+        top = {k: {n: 0 for n in qualified} for k in AWARD_KEYS}
+        size_vals = {k: [] for k in size_keys}
+        win_vals = {a: {b: [] for b in qualified if b != a} for a in qualified}
+        N = len(clusters)
+        for _ in range(samples):
+            idx = sorted(math.floor(rand() * N) for _ in range(N))
+            rs = [r for k in idx for r in clusters[k]]
+            sm = sample_stats(rs)
+            for key in AWARD_KEYS:
+                best = None
+                winners = []
+                for n in qualified:
+                    v = sm["stats"].get(n, {}).get(key)
+                    if v is None:
+                        continue
+                    ref = sm["league"][key]
+                    if key not in NO_BASELINE and ref is not None:
+                        diffs[key][n].append(v - ref)
+                    if not full:
+                        continue
+                    values[key][n].append(v)
+                    if n not in contenders:
+                        continue
+                    if best is None or (v < best if key in ASCENDING else v > best):
+                        best, winners = v, [n]
+                    elif v == best:
+                        winners.append(n)
+                for w in winners:
+                    top[key][w] += 1 / len(winners)
+            if not full:
                 continue
-            for b in qualified:
-                rb = sm["stats"].get(b, {}).get("elo")
-                if a != b and rb is not None:
-                    win_vals[a][b].append(elo_expected(ra, rb))
+            for k in size_keys:
+                if k in sm["sizes"]:
+                    size_vals[k].append(sm["sizes"][k])
+            for a in qualified:
+                ra = sm["stats"].get(a, {}).get("elo")
+                if ra is None:
+                    continue
+                for b in qualified:
+                    rb = sm["stats"].get(b, {}).get("elo")
+                    if a != b and rb is not None:
+                        win_vals[a][b].append(elo_expected(ra, rb))
+        return values, diffs, top, size_vals, win_vals
+
+    values, diffs, top, size_vals, win_vals = boot(tables, mulberry32(seed), True)
+    _, round_diffs, _, _, _ = boot([[r] for r in rounds], mulberry32(seed + 1), False)
 
     awards = {}
     for key in AWARD_KEYS:
         ps = [None if key in NO_BASELINE else boot_p(diffs[key][n]) for n in qualified]
-        qs = bh_adjust(ps)
+        pr = [None if key in NO_BASELINE else boot_p(round_diffs[key][n]) for n in qualified]
+        qs, qr = bh_adjust(ps), bh_adjust(pr)
         awards[key] = {
-            n: {**interval(values[key][n]), "pTop": top[key][n] / samples, "p": ps[i], "q": qs[i]}
+            n: {**interval(values[key][n]), "pTop": top[key][n] / samples, "p": ps[i], "q": qs[i],
+                "pRound": pr[i], "qRound": qr[i]}
             for i, n in enumerate(qualified)
         }
 
@@ -392,7 +408,7 @@ def build_uncertainty(rounds, samples=BOOTSTRAP_SAMPLES, permutations=PERMUTATIO
 
     return {
         "samples": samples,
-        "nights": N,
+        "tables": len(tables),
         "qualified": qualified,
         "league": base["league"],
         "awards": awards,
@@ -420,6 +436,12 @@ AWARD_TITLES = {
 }
 
 
+def verdict(stat):
+    """firm: significant resampling tables AND single rounds; borderline: only one of them."""
+    hits = sum(q is not None and q < ALPHA for q in (stat.get("q"), stat.get("qRound")))
+    return {2: "firm", 1: "borderline"}.get(hits, "")
+
+
 def significance_sheets(unc, pd):
     """The uncertainty as titled tables for AntidoteStats.xlsx."""
     r3 = lambda x: None if x is None else round(x, 3)
@@ -428,7 +450,9 @@ def significance_sheets(unc, pd):
         rows = [
             {"Player": n, "95% CI Low": r3(s["lo"]), "95% CI High": r3(s["hi"]),
              "Chance of #1": r3(s["pTop"]),
-             "p vs League": r3(s["p"]), "q (BH)": r3(s["q"])}
+             "p vs League": r3(s["p"]), "q (BH)": r3(s["q"]),
+             "p (rounds)": r3(s["pRound"]), "q (rounds)": r3(s["qRound"]),
+             "Verdict": verdict(s)}
             for n, s in unc["awards"][key].items()
         ]
         award_blocks.append((AWARD_TITLES[key], pd.DataFrame(rows)))
@@ -447,9 +471,10 @@ def significance_sheets(unc, pd):
             for n in unc["qualified"]])),
     ]
     note = pd.DataFrame([{
-        "Method": f"Bootstrap by night ({unc['samples']} resamples of {unc['nights']} nights, seed "
+        "Method": f"Bootstrap by table ({unc['samples']} resamples of {unc['tables']} tables, seed "
                   f"{STATS_SEED}); 95% percentile intervals; p vs League = two-sided bootstrap; "
-                  "q = Benjamini-Hochberg within each table. q < 0.05 is significant."}])
+                  "q = Benjamini-Hochberg within each block. Firm = q < 0.05 resampling tables and "
+                  "single rounds; borderline = only one."}])
     return {
         "Significance": [("How to read this", note)] + award_blocks,
         "Significance Tests": tests,

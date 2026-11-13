@@ -26,18 +26,19 @@ python Antidote_score_stats.py --input other.txt    # read a different score fil
 - `Rivals`: head-to-head on clamped scores (dying on −1 or −4 counts the same) with Elo's win chance, and chemistry (survival with and without each partner).
 - `Endings & Nights`: S/X end cards by player and by table size, the biggest Elo swings in a night, and the upset of each night (the finish pre-game Elo thought least likely).
 - `Elo History`: everyone's rating after every round.
-- `Significance`: for every award, each player's 95% interval, chance of really being #1, and p / q against the league average.
+- `Significance`: for every award, each player's 95% interval, chance of really being #1, p / q against the league average (resampling tables, and resampling single rounds), and a firm / borderline verdict.
 - `Significance Tests`: head-to-head sign tests, chemistry / bounce-back / closer Fisher tests, and hot-or-due permutation tests.
 
 ## How sure are we?
 
 With a few dozen rounds, most gaps between players could be luck. `league_stats.py` says which aren't:
 
-- **95% intervals** come from a bootstrap by night: the nights are resampled with replacement 2,000 times (seed 1729) and every stat is recomputed. Whole nights are resampled because rounds on one night aren't independent.
+- **95% intervals** come from a bootstrap by table: the tables (one date block each: a group playing consecutive rounds) are resampled with replacement 2,000 times (seed 1729) and every stat is recomputed. Whole tables are resampled because rounds at one table aren't independent.
 - **Chance of #1** is the share of resamples a regular tops an award.
 - **p-values:** awards vs the league average (bootstrap), head-to-head (exact sign test), chemistry / bounce-back / closer (Fisher's exact test), hot-or-due (permutation test).
 - **q-values** apply the Benjamini-Hochberg correction within each table, because every player and pair is tested at once. q < 0.05 is significant.
-- Only players with 5+ rounds over 3+ nights are tested.
+- **Firm or borderline:** groups recur across nights, so no resampling unit is perfect. Award comparisons are also run resampling single rounds. "Firm" means both agree (q < 0.05 each way); "borderline" means only one does.
+- Only players with 5+ rounds over 3+ tables are tested.
 
 ## The website
 
