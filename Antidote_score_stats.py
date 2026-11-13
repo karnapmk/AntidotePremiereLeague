@@ -66,6 +66,9 @@ SCORE_SCALED = f"Average Score ({SCORE_SCALE}-player scale)"
 HAND_SCALED = f"Average Hand Played ({SCORE_SCALE}-player scale)"
 SNAKE_COLUMN = "Peer Survival Rate | Survived"
 TEAM_COLUMN = "Peer Survival Rate | All Rounds"
+# A 2-player game is dealt like a 3-player one (cards run to 3, with the silent player), so
+# it is scored like one: S/X penalties and every normalized column use at least 3 players.
+SCORING_MIN_PLAYERS = 3
 ELO_START = 1000
 ELO_K = 32
 
@@ -130,11 +133,28 @@ SECTIONS_PER_PAGE = 3
 BADGE_SLOT_W = 0.62
 
 
+class Score(tuple):
+    """A (score, hand) pair that also remembers its end card: .end is "S", "X" or None.
+
+    Still unpacks as `score, hand`, so every caller that only wants those is unchanged.
+    """
+
+    def __new__(cls, score, hand, end=None):
+        pair = super().__new__(cls, (score, hand))
+        pair.end = end
+        return pair
+
+
+def scoring_size(players):
+    """The table size a round is scored at: the real count, but never below 3."""
+    return max(players, SCORING_MIN_PLAYERS)
+
+
 def parse_score(token, table_size):
     """Return (score, hand) for a token like '5', '-3', '(5-1)', 'S' or '(X-1)'.
 
     S (syringe) and X (toxin) mark a player who ended the game with that card, which
-    the house rules score as -ceil(n/2) at an n-player table. The hand is how big a
+    the house rules score as -ceil(n/2) at an n-player table (n counted as at least 3). The hand is how big a
     card was gambled on: the score's size, but 0 for S or X, since that penalty is
     set by the table rather than chosen.
     """
@@ -146,10 +166,12 @@ def parse_score(token, table_size):
     if not match:
         raise ValueError(f"Cannot parse score {token!r}")
     head = match.group(1)
-    base = -((table_size + 1) // 2) if head in END_CARDS else int(head)
+    base = -((scoring_size(table_size) + 1) // 2) if head in END_CARDS else int(head)
     adjustments = [int(a) for a in re.findall(r"[+-]\d+", match.group(2))]
     score = base + sum(adjustments)
-    return score, 0 if head in END_CARDS else abs(score)
+    if head in END_CARDS:
+        return Score(score, 0, head)
+    return Score(score, abs(score))
 
 
 def parse_date(text):
@@ -260,7 +282,11 @@ def average(records, pick):
     return sum(pick(record) for record in records) / len(records)
 
 
-def build_tables(sessions):
+def collect_rounds(sessions):
+    """Every round as ((date, session index, round index), label, {name: Score}), sorted.
+
+    Also returns the GameLog rows and the players in order of first appearance.
+    """
     log_rows = []
     player_order = []
     seen = set()
@@ -305,9 +331,19 @@ def build_tables(sessions):
             scores = {name: score for name, (score, _) in entries.items()}
             hands = {name: hand for name, (_, hand) in entries.items()}
             log_rows.append({"Date": date, "Round": round_index + 1, **scores})
-            played.append(((session["parsed_date"], session_index, round_index), scores, hands))
+            played.append(((session["parsed_date"], session_index, round_index), date, entries))
 
     played.sort(key=lambda entry: entry[0])
+    return played, log_rows, player_order
+
+
+def build_tables(sessions):
+    rounds, log_rows, player_order = collect_rounds(sessions)
+    played = [
+        (key, {name: score for name, (score, _) in entries.items()},
+         {name: hand for name, (_, hand) in entries.items()})
+        for key, _, entries in rounds
+    ]
     # Only the hand-played stats need hands; everything downstream takes plain scores.
     round_scores = [scores for _, scores, _ in played]
     round_dates = [key[0] for key, _, _ in played]
@@ -319,7 +355,7 @@ def build_tables(sessions):
     for round_index, scores in enumerate(round_scores):
         for name, score in scores.items():
             points = score_history.setdefault(name, [])
-            total = (points[-1][1] * len(points) if points else 0) + score / len(scores) * SCORE_SCALE
+            total = (points[-1][1] * len(points) if points else 0) + score / scoring_size(len(scores)) * SCORE_SCALE
             points.append((round_index, total / (len(points) + 1)))
 
     # Every per-player stat below needs the round it was earned in -- the table size
@@ -350,6 +386,8 @@ def build_tables(sessions):
                     # The mirror image: the only one at a 3+ table who died.
                     "solo_loss": score <= 0 and survivors == count - 1 and count > 2,
                     "count": count,
+                    # What normalized columns divide by: 2-player rounds count as 3.
+                    "scale": scoring_size(count),
                     "group_score": group_score,
                     "peer_survival": peers,
                     "delta": score - group_score,
@@ -381,13 +419,13 @@ def build_tables(sessions):
                 # average those per-round ratios -- never total/total, which would let
                 # the biggest tables dominate.
                 "Average Normalized Score":
-                    round(average(games, lambda g: g["score"] / g["count"]), 3),
+                    round(average(games, lambda g: g["score"] / g["scale"]), 3),
                 "Average Hand Played": round(average(games, lambda g: g["hand"]), 2),
                 "Average Normalized Hand Played":
-                    round(average(games, lambda g: g["hand"] / g["count"]), 3),
+                    round(average(games, lambda g: g["hand"] / g["scale"]), 3),
                 "Average Group Score": round(average(games, lambda g: g["group_score"]), 2),
                 "Average Normalized Group Score":
-                    round(average(games, lambda g: g["group_score"] / g["count"]), 3),
+                    round(average(games, lambda g: g["group_score"] / g["scale"]), 3),
                 TEAM_COLUMN:
                     round(average(with_peers, lambda g: g["peer_survival"]), 3)
                     if with_peers else None,
@@ -398,7 +436,7 @@ def build_tables(sessions):
                     if survived else None,
                 "Average Delta": round(average(games, lambda g: g["delta"]), 2),
                 "Average Normalized Delta":
-                    round(average(games, lambda g: g["delta"] / g["count"]), 3),
+                    round(average(games, lambda g: g["delta"] / g["scale"]), 3),
                 "Elo": round(ratings.get(name, ELO_START)),
             }
         )
@@ -1168,15 +1206,56 @@ def write_blocks(book, name, blocks):
         sheet.column_dimensions[letter].width = width
 
 
+def write_json(path, sessions, player_stats, rounds, trend_data, group_stats, count_stats, extras,
+               uncertainty):
+    """Every number the website shows, unrounded where the script keeps full precision."""
+    import json
+
+    score_history, round_dates = trend_data
+    records = lambda frame: [{k: cell_value(v) for k, v in row.items()} for row in frame.to_dict("records")]
+    data = {
+        "rounds": len(rounds),
+        "sessions": len({s["date"] for s in sessions if s["parsed_date"] is not None and
+                         (s["rounds"] or s["players"])}),
+        "players": records(player_stats),
+        "roundScores": rounds,
+        "dates": [d.isoformat() for d in round_dates],
+        "history": {name: [list(p) for p in points] for name, points in score_history.items()},
+        "byCount": records(count_stats),
+        "byGroup": records(group_stats),
+        "elo": extras["ratings"],
+        **{k: v for k, v in extras.items() if k not in ("rounds", "ratings")},
+        "uncertainty": uncertainty,
+    }
+    path.write_text(json.dumps(data, indent=1))
+    print(f"{path}: {data['rounds']} rounds, {len(data['players'])} players")
+
+
 def main():
     parser = argparse.ArgumentParser(description="Antidote score stats and report card")
     parser.add_argument("--npcs", action="store_true",
                         help="also rank players outside the canonical set on the report card")
+    parser.add_argument("--input", type=Path, default=INPUT_FILE,
+                        help="score file to read (default: AntidoteScores.txt)")
+    parser.add_argument("--json", type=Path, metavar="PATH",
+                        help="only write every stat to PATH as JSON (the website's test fixture); "
+                             "the workbook and report card are left alone")
     args = parser.parse_args()
 
-    sessions = parse_sessions(INPUT_FILE)
+    # Imported here: league_extras and league_stats import constants from this module.
+    import league_extras
+    import league_stats
+
+    sessions = parse_sessions(args.input)
     game_log, player_stats, rounds, trend_data = build_tables(sessions)
     group_stats, count_stats = build_group_tables(rounds)
+    extras = league_extras.build_extras(collect_rounds(sessions)[0])
+    uncertainty = league_stats.build_uncertainty(extras["rounds"])
+
+    if args.json:
+        write_json(args.json, sessions, player_stats, rounds, trend_data, group_stats, count_stats, extras,
+                   uncertainty)
+        return
 
     if WORKBOOK.exists():
         book = load_workbook(WORKBOOK)
@@ -1190,6 +1269,10 @@ def main():
         ("By lineup", group_stats),
         ("By player count", count_stats),
     ])
+    for name, blocks in league_extras.extras_sheets(extras, pd).items():
+        write_blocks(book, name, blocks)
+    for name, blocks in league_stats.significance_sheets(uncertainty, pd).items():
+        write_blocks(book, name, blocks)
     book.save(WORKBOOK)
     report = write_report_card(player_stats, game_log, trend_data, include_npcs=args.npcs)
 
